@@ -1,0 +1,29 @@
+[33mcommit 2135dfbc7c6b306184569aa00c57bcde8dd0717c[m[33m ([m[1;36mHEAD[m[33m -> [m[1;32mmain[m[33m)[m
+Author: Chris Manuel <etchomechris2000@gmail.com>
+Date:   Sun Apr 26 05:49:15 2026 +0100
+
+    TWIST_N°08 : Une tentative de fraude consiste à retrodater des lignes pour embellir la courbe de cash. Nous avons implémenté une piste d'audit inviolable; chaque transaction stocke deux dates (date d'opération et la date de saisie), on compare automatiquement ce
+
+[33mcommit 31d80fdaa885289d6384eb2b068265e0b051b266[m[33m ([m[1;31morigin/main[m[33m)[m
+Author: Chris Manuel <etchomechris2000@gmail.com>
+Date:   Sun Apr 26 05:30:53 2026 +0100
+
+    TWIST_N°07 : La banque exige un relevé de tresorerie six mois compréhensible tel quel. Nous avons implémenté un rapport de trésorerie dans l'application, pour cela nousavons dévéloppé un nouvel endpoint coté backend qui calcule automatiquement les entrées, les sorties et le solde net pour chacun des 6 derniers mois, coté frontend nous avons ajouté un graphique à barre interactif et un tableau récapitulatif mois par mois avec les montants exacts en XAF
+
+[33mcommit b246eeb3688705a7062366a6890a2498d8e61bd8[m
+Author: Chris Manuel <etchomechris2000@gmail.com>
+Date:   Sun Apr 26 04:53:22 2026 +0100
+
+    TWIST_N°6 : Des paiements mobile money se regroupent ou se fragmentent différemment de la facture interne.Une transaction financière (flux d'argent réel) est séparée d'une opération commerciale (facture). Le lien entre les deux est explicite et traçable. Nous avons donc ajouté une fonctionnalité de Fragmentation dans l'application, dans la liste des transactions on peut cliquer sur une transaction eet un modal Fragmenter s'affiche. Le système utilise l'annulation de transaction précédemment implémentée. Pour cela nous avons ajouté un champ parent_id dans models.py pour tracer la fragmentation
+
+[33mcommit b8c211ce13685690742339c56dc92febde2da12b[m
+Author: Chris Manuel <etchomechris2000@gmail.com>
+Date:   Sun Apr 26 04:15:06 2026 +0100
+
+    TWIST_N°05: Le propriétaire et son assistant travaillent deux jours hors ligne sur deux téléphones. Nous avons implémenté le mode Offline& Multi-Appareils. Coté Backend nous avons ajouté des endpoints envoi groupé et de récupération des nouveautés depuis une date donnée. Donc le propriétaire et son assisatant peuvent saisir les factures en sans réseau et tout sera synchronisé une fois connecté à internet
+
+[33mcommit 123c656ad49706eebfe431142bb2d4c559729d32[m
+Author: Chris Manuel <etchomechris2000@gmail.com>
+Date:   Sun Apr 26 03:57:38 2026 +0100
+
+    TWIST_N°4: Le banquier interdit toute suppression : seules les corrections tracees sont recevables. Nous avons ajouté le endpoint d'annulation qui respecte les règles d'immuabilité, la transaction n'est jamais supprimée on crée automatiquement une transaction inverse, le endpoint se charge de tracer cette action en remplissant le champ correction_de avec l'id de la transaction d'origine
