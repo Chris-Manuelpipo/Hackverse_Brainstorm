@@ -59,6 +59,8 @@ export const api = {
     bilan: (startDate, endDate) => request(`/reports/bilan?start=${startDate}&end=${endDate}`),
     resultat: (startDate, endDate) => request(`/reports/resultat?start=${startDate}&end=${endDate}`),
     cashflow: () => request('/reports/cashflow'),
+    share: (data) => request('/reports/share', { method: 'POST', body: JSON.stringify(data) }),
+    getPublic: (token) => request(`/public/reports/${token}`),
   },
 
   auth: {

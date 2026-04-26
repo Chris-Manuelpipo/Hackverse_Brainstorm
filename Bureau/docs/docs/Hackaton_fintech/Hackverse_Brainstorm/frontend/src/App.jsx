@@ -14,6 +14,7 @@ import Dashboard from './pages/Dashboard';
 import NewTransaction from './pages/NewTransaction';
 import Accounts from './pages/Accounts';
 import Reports from './pages/Reports';
+import PublicReport from './pages/PublicReport';
 import Categories from './pages/Categories';
 import SettingsPage from './pages/Settings';
 import Login from './pages/Login';
@@ -51,6 +52,7 @@ export default function App() {
   const location = useLocation();
   const isLoginPage = location.pathname === '/login';
   const isLogoutRoute = location.pathname === '/logout';
+  const isSharedRoute = location.pathname.startsWith('/shared-report/');
 
   useEffect(() => {
     const handleOnline = () => setIsOnline(true);
@@ -67,6 +69,18 @@ export default function App() {
 
   const toggleSidebar = () => setSidebarOpen(!sidebarOpen);
   const closeSidebar = () => setSidebarOpen(false);
+
+  // If it's a shared report, don't show the sidebar or app layout
+  if (isSharedRoute) {
+    return (
+      <div className="public-report-container" style={{height: '100vh', overflowY: 'auto', background: '#f0f0ee'}}>
+        <Routes>
+          <Route path="/shared-report/:token" element={<PublicReport />} />
+        </Routes>
+      </div>
+    );
+  }
+
 
   return (
     <div className={`app-wrapper ${isLoginPage || isLogoutRoute ? 'login-page' : ''}`}>

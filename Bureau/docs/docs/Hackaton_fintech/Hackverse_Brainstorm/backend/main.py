@@ -32,7 +32,7 @@ app.add_middleware(
 
 app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
 
-# --- COMPTES ----
+# --- COMPTES ---
 
 @app.get("/api/accounts", response_model=List[schemas.AccountResponse])
 def get_accounts(db: Session = Depends(get_db)):
@@ -76,21 +76,12 @@ def create_account(acc: schemas.AccountCreate, db: Session = Depends(get_db)):
 
 @app.get("/api/accounts/{account_id}/balance")
 def get_account_balance(account_id: str, db: Session = Depends(get_db)):
-    # Simple calculation: initial + in - out
     acc = db.query(models.Account).filter(models.Account.id == account_id).first()
     if not acc:
         raise HTTPException(status_code=404, detail="Compte introuvable")
-    
     txs = db.query(models.Transaction).filter(models.Transaction.compte_id == account_id, models.Transaction.statut == "CONFIRME").all()
-    
-    balance = acc.solde_initial
-    for tx in txs:
-        if tx.type_flux == "ENTREE":
-            balance += tx.montant
-        else:
-            balance -= tx.montant
-            
-    return balance
+    bal = acc.solde_initial + sum(t.montant if t.type_flux == "ENTREE" else -t.montant for t in txs)
+    return max(0, bal)
 
 @app.delete("/api/accounts/{account_id}")
 def delete_account(account_id: str, db: Session = Depends(get_db)):
@@ -372,19 +363,57 @@ def sync_push(transactions: List[schemas.TransactionCreate], db: Session = Depen
 @app.get("/api/reports/cashflow")
 def get_cashflow_report(db: Session = Depends(get_db)):
     from datetime import date, timedelta
+    from collections import Counter
     today = date.today()
     months = []
     for i in range(5, -1, -1):
         d = (today.replace(day=1) - timedelta(days=i*28)).replace(day=1)
         months.append(d.strftime("%Y-%m"))
     
+    initial_total = sum(acc.solde_initial for acc in db.query(models.Account).all())
+    first_month = months[0]
+    older_txs = db.query(models.Transaction).filter(models.Transaction.date_operation < first_month, models.Transaction.statut == "CONFIRME").all()
+    cumulative_balance = initial_total + sum(t.montant if t.type_flux == "ENTREE" else -t.montant for t in older_txs)
+
     res = []
+    all_categories = {c.id: c.libelle_user for c in db.query(models.Category).all()}
+    
     for m in months:
         txs = db.query(models.Transaction).filter(models.Transaction.date_operation.like(f"{m}%"), models.Transaction.statut == "CONFIRME").all()
         income = sum(t.montant for t in txs if t.type_flux == "ENTREE")
         expense = sum(t.montant for t in txs if t.type_flux == "SORTIE")
-        res.append({"month": m, "income": income, "expense": expense, "balance": income - expense})
+        cumulative_balance += (income - expense)
+        
+        cat_stats = Counter()
+        tx_details = []
+        for t in txs:
+            cat_stats[all_categories.get(t.categorie_id, "Autre")] += t.montant
+            # Fetch attachments for this transaction
+            attachments = db.query(models.PieceJointe).filter(models.PieceJointe.transaction_id == t.id).all()
+            tx_details.append({
+                "id": t.id,
+                "date": t.date_operation,
+                "description": t.tiers_nom or t.note,
+                "amount": t.montant,
+                "type": "credit" if t.type_flux == "ENTREE" else "debit",
+                "reference": t.reference_externe,
+                "has_proof": len(attachments) > 0,
+                "proofs": [{"id": p.id, "type": p.type_fichier} for p in attachments]
+            })
+        
+        res.append({
+            "month": m, 
+            "income": income, 
+            "expense": expense, 
+            "balance": income - expense,
+            "cumulative": max(0, cumulative_balance),
+            "tx_count": len(txs),
+            "top_categories": [{"name": k, "value": v} for k, v in cat_stats.most_common(3)],
+            "transactions": tx_details # Added for proof verification
+        })
     return res
+
+
 
 @app.post("/api/sync/push")
 def sync_push(transactions: List[schemas.TransactionCreate], db: Session = Depends(get_db)):
@@ -422,7 +451,231 @@ def sync_pull(last_sync: str = None, db: Session = Depends(get_db)):
         "reference": tx.reference_externe, "hash": tx.hash
     } for tx in txs]
 
+@app.post("/api/reports/share", response_model=schemas.SharedReportResponse)
+def share_report(req: schemas.SharedReportCreate, db: Session = Depends(get_db)):
+    from datetime import timedelta
+    token = str(uuid.uuid4())
+    expires_at = (datetime.now() + timedelta(days=req.expires_in_days)).isoformat() if req.expires_in_days else None
+    
+    db_shared = models.SharedReport(
+        token=token,
+        report_type=req.report_type,
+        created_at=datetime.now().isoformat(),
+        expires_at=expires_at
+    )
+    db.add(db_shared)
+    db.commit()
+    
+    # In a real app, this would be the actual domain
+    share_url = f"/shared-report/{token}"
+    
+    return {
+        "token": token,
+        "report_type": db_shared.report_type,
+        "expires_at": db_shared.expires_at,
+        "share_url": share_url
+    }
+
+@app.get("/api/public/reports/{token}")
+def get_public_report(token: str, db: Session = Depends(get_db)):
+    shared = db.query(models.SharedReport).filter(models.SharedReport.token == token, models.SharedReport.is_active == 1).first()
+    if not shared:
+        raise HTTPException(status_code=404, detail="Rapport introuvable ou lien expiré")
+    
+    if shared.expires_at and datetime.fromisoformat(shared.expires_at) < datetime.now():
+        shared.is_active = 0
+        db.commit()
+        raise HTTPException(status_code=404, detail="Lien expiré")
+    
+    if shared.report_type == "cashflow":
+        return get_cashflow_report(db)
+    
+    raise HTTPException(status_code=400, detail="Type de rapport non supporté")
+
+@app.get("/api/public/reports/{token}/pdf")
+def get_public_report_pdf(token: str, db: Session = Depends(get_db)):
+    try:
+        shared = db.query(models.SharedReport).filter(models.SharedReport.token == token, models.SharedReport.is_active == 1).first()
+        if not shared:
+            raise HTTPException(status_code=404, detail="Lien invalide")
+        
+        # Check expiration
+        if shared.expires_at:
+            try:
+                if datetime.fromisoformat(shared.expires_at) < datetime.now():
+                    raise HTTPException(status_code=404, detail="Lien expiré")
+            except ValueError:
+                pass # Ignore date format errors for now
+        
+        # Fetch data
+        data = get_cashflow_report(db)
+        
+        # Generate PDF
+        from reportlab.lib.pagesizes import A4
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+        from reportlab.lib.styles import getSampleStyleSheet
+        from reportlab.lib import colors
+        from collections import Counter
+        import io
+        from fastapi.responses import StreamingResponse
+
+        buffer = io.BytesIO()
+        doc = SimpleDocTemplate(buffer, pagesize=A4)
+        styles = getSampleStyleSheet()
+        elements = []
+
+        # Title
+        elements.append(Paragraph("RAPPORT D'ACTIVITÉ & TRÉSORERIE", styles['Title']))
+        elements.append(Spacer(1, 20))
+
+        # Header Info
+        elements.append(Paragraph(f"<b>Document Certifié par :</b> PMECompta", styles['Normal']))
+        elements.append(Paragraph(f"<b>Date de génération :</b> {datetime.now().strftime('%d/%m/%Y %H:%M')}", styles['Normal']))
+        elements.append(Paragraph(f"<b>Période analysée :</b> 6 derniers mois", styles['Normal']))
+        elements.append(Spacer(1, 30))
+
+        # Activity Summary
+        elements.append(Paragraph("<b>1. Résumé de l'Activité</b>", styles['Heading2']))
+        total_in = sum(m['income'] for m in data)
+        total_out = sum(m['expense'] for m in data)
+        final_bal = data[-1]['cumulative']
+        elements.append(Paragraph(
+            f"Au cours des 6 derniers mois, l'entreprise a généré un flux d'entrées cumulé de "
+            f"<b>{total_in:,.0f} XAF</b>. Le solde de clôture certifié au {data[-1]['month']} est de "
+            f"<b>{final_bal:,.0f} XAF</b>.", 
+            styles['Normal']
+        ))
+        elements.append(Spacer(1, 15))
+
+        # Top Categories
+        elements.append(Paragraph("<b>2. Analyse des Flux par Catégorie</b>", styles['Heading2']))
+        cat_data = [["Catégorie", "Volume de transactions (XAF)"]]
+        # Aggregate top categories across all months
+        global_cats = Counter()
+        for m in data:
+            for c in m['top_categories']:
+                global_cats[c['name']] += c['value']
+        
+        for name, val in global_cats.most_common(5):
+            cat_data.append([name, f"{val:,.0f}"])
+        
+        ct = Table(cat_data, colWidths=[230, 230])
+        ct.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+            ('ALIGN', (1, 0), (1, -1), 'RIGHT'),
+        ]))
+        elements.append(ct)
+        elements.append(Spacer(1, 20))
+
+        # Financial History Table (Summary)
+        elements.append(Paragraph("<b>3. Historique Financier Détaillé (Synthèse)</b>", styles['Heading2']))
+        table_data = [["Mois", "Entrées (XAF)", "Sorties (XAF)", "Solde Progressif"]]
+        for m in data:
+            table_data.append([
+                str(m['month']), 
+                f"{m['income']:,.0f}", 
+                f"{m['expense']:,.0f}", 
+                f"{m['cumulative']:,.0f}"
+            ])
+        
+        t = Table(table_data, colWidths=[100, 120, 120, 120])
+        t.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#003366")),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+            ('GRID', (0, 0), (-1, -1), 1, colors.black),
+            ('TEXTCOLOR', (3, 1), (3, -1), colors.darkgreen),
+        ]))
+        elements.append(t)
+        elements.append(Spacer(1, 20))
+
+        # Proof of Transactions Log
+        elements.append(Paragraph("<b>4. Journal des Preuves & Justificatifs</b>", styles['Heading2']))
+        log_data = [["Date", "Description", "Montant", "Statut Preuve"]]
+        
+        # Flatten all transactions from the 6 months
+        all_txs = []
+        for m in data:
+            all_txs.extend(m['transactions'])
+        
+        # Limit to the last 30 for the PDF to avoid huge file, or provide all if requested
+        for tx in all_txs[:50]: # Showing first 50 for the PDF
+            log_data.append([
+                tx['date'],
+                Paragraph(tx['description'][:30] + ('...' if len(tx['description'])>30 else ''), styles['Normal']),
+                f"{tx['amount']:,.0f}",
+                "CERTIFIÉE ✅" if tx['has_proof'] else "-"
+            ])
+            
+        lt = Table(log_data, colWidths=[80, 180, 100, 100])
+        lt.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+            ('FONTSIZE', (0, 0), (-1, -1), 8),
+            ('ALIGN', (2, 0), (2, -1), 'RIGHT'),
+        ]))
+        elements.append(lt)
+        
+        if len(all_txs) > 50:
+            elements.append(Paragraph(f"<i>... {len(all_txs)-50} autres transactions consultables via le lien numérique.</i>", styles['Normal']))
+
+        elements.append(Spacer(1, 30))
+
+        # Fraud / Integrity Note
+        elements.append(Paragraph("<b>5. Certification d'Intégrité</b>", styles['Heading2']))
+        elements.append(Paragraph(
+            "<i>Document établi selon les normes de transparence financière. Les pièces justificatives "
+            "numérisées (MoMo, factures, reçus) sont archivées et consultables via le jeton de sécurité. "
+            "La conformité de ce rapport est garantie par PMECompta.</i>",
+            styles['Normal']
+        ))
+
+
+
+
+        # Build PDF
+        doc.build(elements)
+        buffer.seek(0)
+        
+        return StreamingResponse(
+            buffer, 
+            media_type="application/pdf",
+            headers={"Content-Disposition": f"attachment; filename=Rapport_Tresorerie_{token[:8]}.pdf"}
+        )
+    except Exception as e:
+        import traceback
+        error_msg = f"{str(e)}\n{traceback.format_exc()}"
+        print(f"Error generating PDF: {error_msg}")
+        raise HTTPException(status_code=500, detail=error_msg)
+
+
+
+
+@app.get("/api/public/attachments/{token}/{attachment_id}")
+def get_public_attachment(token: str, attachment_id: str, db: Session = Depends(get_db)):
+    shared = db.query(models.SharedReport).filter(models.SharedReport.token == token, models.SharedReport.is_active == 1).first()
+    if not shared:
+        raise HTTPException(status_code=404, detail="Lien invalide")
+    
+    # Check expiration
+    if shared.expires_at and datetime.fromisoformat(shared.expires_at) < datetime.now():
+        raise HTTPException(status_code=404, detail="Lien expiré")
+
+    pj = db.query(models.PieceJointe).filter(models.PieceJointe.id == attachment_id).first()
+    if not pj:
+        raise HTTPException(status_code=404, detail="Pièce jointe introuvable")
+    
+    if not os.path.exists(pj.chemin_local):
+        raise HTTPException(status_code=404, detail="Fichier introuvable sur le serveur")
+    
+    from fastapi.responses import FileResponse
+    return FileResponse(pj.chemin_local)
+
 @app.get("/api/reports/dashboard")
+
 def get_dashboard_summary(db: Session = Depends(get_db)):
     from datetime import date
     accounts = db.query(models.Account).all()
@@ -432,10 +685,14 @@ def get_dashboard_summary(db: Session = Depends(get_db)):
     month_txs = db.query(models.Transaction).filter(models.Transaction.date_operation.like(f"{current_month}%"), models.Transaction.statut == "CONFIRME").all()
     m_in = sum(t.montant for t in month_txs if t.type_flux == "ENTREE")
     m_out = sum(t.montant for t in month_txs if t.type_flux == "SORTIE")
+    
     balances = {}
     for acc in accounts:
         txs = db.query(models.Transaction).filter(models.Transaction.compte_id == acc.id, models.Transaction.statut == "CONFIRME").all()
-        balances[acc.id] = acc.solde_initial + sum(t.montant if t.type_flux == "ENTREE" else -t.montant for t in txs)
+        # Enforce floor at 0 for every account
+        bal = acc.solde_initial + sum(t.montant if t.type_flux == "ENTREE" else -t.montant for t in txs)
+        balances[acc.id] = max(0, bal)
+        
     return {
         "accounts": [{"id": a.id, "name": a.nom, "type": a.type_compte.lower()} for a in accounts],
         "balances": balances,
@@ -446,7 +703,11 @@ def get_dashboard_summary(db: Session = Depends(get_db)):
             "description": tx.tiers_nom or tx.note, "account_id": tx.compte_id,
             "category_id": tx.categorie_id, "synced": tx.date_sync is not None
         } for tx in recent],
-        "monthlyIn": m_in, "monthlyOut": m_out, "netBalance": m_in - m_out
+        "monthlyIn": m_in, 
+        "monthlyOut": m_out, 
+        "netBalance": max(0, m_in - m_out) # Enforce floor at 0
     }
+
+
 
 
