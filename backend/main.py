@@ -22,6 +22,7 @@ def get_allowed_origins():
     if env_origins:
         return [origin.strip() for origin in env_origins.split(",") if origin.strip()]
     return [
+        "https://hackverse-brainstorm.vercel.app",
         "http://localhost:5173",
         "http://127.0.0.1:5173",
         "http://localhost:3000",
