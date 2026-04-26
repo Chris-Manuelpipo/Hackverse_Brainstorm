@@ -56,8 +56,3 @@ class SharedReportResponse(BaseModel):
     report_type: str
     expires_at: Optional[str]
     share_url: str
-<<<<<<< HEAD
-=======
-
-
->>>>>>> 6e8f388 (fix page reports)
