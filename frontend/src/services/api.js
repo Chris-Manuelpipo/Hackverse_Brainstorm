@@ -137,6 +137,12 @@ export async function getPublicReport(token) {
   return await api.reports.getPublic(token);
 }
 
+export function getPublicReportPdfUrl(token) {
+  const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000/api';
+  return `${API_BASE}/public/reports/${token}/pdf`;
+}
+
+
 
 function computeHash(data) {
   const str = JSON.stringify(data);

@@ -73,11 +73,14 @@ export default function App() {
   // If it's a shared report, don't show the sidebar or app layout
   if (isSharedRoute) {
     return (
-      <Routes>
-        <Route path="/shared-report/:token" element={<PublicReport />} />
-      </Routes>
+      <div className="public-report-container" style={{height: '100vh', overflowY: 'auto', background: '#f0f0ee'}}>
+        <Routes>
+          <Route path="/shared-report/:token" element={<PublicReport />} />
+        </Routes>
+      </div>
     );
   }
+
 
   return (
     <div className={`app-wrapper ${isLoginPage || isLogoutRoute ? 'login-page' : ''}`}>

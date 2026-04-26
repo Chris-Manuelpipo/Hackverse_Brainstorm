@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useParams } from 'react-router-dom';
-import { getPublicReport, getPublicReportPdfUrl } from '../services/api';
+import { getPublicReport } from '../services/api';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 import { FileDown, ShieldCheck, Image as ImageIcon, FileText as FileIcon, Zap } from 'lucide-react';
 
@@ -80,6 +80,7 @@ export default function PublicReport() {
   const [error, setError] = useState(null);
 
   const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000/api';
+  const pdfUrl = `${API_BASE}/public/reports/${token}/pdf`;
 
   useEffect(() => {
     async function loadData() {
@@ -114,7 +115,7 @@ export default function PublicReport() {
           <p style={{color:'var(--n500)', marginTop:'4px'}}>Rapport d'activité & Historique financier</p>
         </div>
         <a 
-          href={getPublicReportPdfUrl(token)} 
+          href={pdfUrl}
           className="btn btn-primary" 
           target="_blank" 
           rel="noopener noreferrer"

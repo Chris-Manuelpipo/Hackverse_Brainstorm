@@ -60,7 +60,7 @@ def get_accounts(db: Session = Depends(get_db)):
             "id": a.id,
             "name": a.nom,
             "type": a.type_compte.lower(),
-            "initial_balance": a.solde_initial,
+            "initial_balance": max(0, a.solde_initial),
             "currency": a.devise
         })
     return res
@@ -77,7 +77,7 @@ def create_account(acc: schemas.AccountCreate, db: Session = Depends(get_db)):
         nom=acc.name,
         type_compte=type_compte,
         devise=acc.currency,
-        solde_initial=acc.initial_balance,
+        solde_initial=max(0, acc.initial_balance),
         date_ouverture=datetime.now().isoformat()
     )
     db.add(db_acc)
@@ -86,27 +86,18 @@ def create_account(acc: schemas.AccountCreate, db: Session = Depends(get_db)):
         "id": db_acc.id,
         "name": db_acc.nom,
         "type": db_acc.type_compte.lower(),
-        "initial_balance": db_acc.solde_initial,
+        "initial_balance": max(0, db_acc.solde_initial),
         "currency": db_acc.devise
     }
 
 @app.get("/api/accounts/{account_id}/balance")
 def get_account_balance(account_id: str, db: Session = Depends(get_db)):
-    # Simple calculation: initial + in - out
     acc = db.query(models.Account).filter(models.Account.id == account_id).first()
     if not acc:
         raise HTTPException(status_code=404, detail="Compte introuvable")
-    
     txs = db.query(models.Transaction).filter(models.Transaction.compte_id == account_id, models.Transaction.statut == "CONFIRME").all()
-    
-    balance = acc.solde_initial
-    for tx in txs:
-        if tx.type_flux == "ENTREE":
-            balance += tx.montant
-        else:
-            balance -= tx.montant
-            
-    return balance
+    bal = acc.solde_initial + sum(abs(t.montant) if t.type_flux == "ENTREE" else -abs(t.montant) for t in txs)
+    return max(0, bal)
 
 @app.delete("/api/accounts/{account_id}")
 def delete_account(account_id: str, db: Session = Depends(get_db)):
@@ -180,7 +171,7 @@ def get_transactions(db: Session = Depends(get_db)):
             "account_id": tx.compte_id,
             "category_id": tx.categorie_id,
             "type": "credit" if tx.type_flux == "ENTREE" else "debit",
-            "amount": tx.montant,
+            "amount": abs(tx.montant),
             "date": tx.date_operation,
             "description": tx.tiers_nom or tx.note,
             "reference": tx.reference_externe,
@@ -199,10 +190,10 @@ def create_transaction(tx: schemas.TransactionCreate, db: Session = Depends(get_
         
         # Calculate current balance
         txs = db.query(models.Transaction).filter(models.Transaction.compte_id == tx.account_id, models.Transaction.statut == "CONFIRME").all()
-        current_bal = acc.solde_initial + sum(t.montant if t.type_flux == "ENTREE" else -t.montant for t in txs)
+        current_bal = acc.solde_initial + sum(abs(t.montant) if t.type_flux == "ENTREE" else -abs(t.montant) for t in txs)
         
-        if tx.amount > current_bal:
-            raise HTTPException(status_code=400, detail=f"Solde insuffisant (Disponible: {current_bal} XAF)")
+        if abs(tx.amount) > current_bal:
+            raise HTTPException(status_code=400, detail=f"Solde insuffisant (Disponible: {max(0, current_bal)} XAF)")
     # --- END VALIDATION ---
 
     tx_id = str(uuid.uuid4())
@@ -214,9 +205,9 @@ def create_transaction(tx: schemas.TransactionCreate, db: Session = Depends(get_
     db_tx = models.Transaction(
         id=tx_id,
         type_flux=type_flux,
-        montant=tx.amount,
+        montant=abs(tx.amount),
         devise=tx.currency,
-        montant_xaf=tx.amount, # assume 1:1 for XAF
+        montant_xaf=abs(tx.amount), # assume 1:1 for XAF
         categorie_id=tx.category_id,
         compte_id=tx.account_id,
         tiers_nom=tx.description,
@@ -355,52 +346,134 @@ def set_setting(key: str, payload: dict):
 
 # --- SYNC ---
 
-@app.post("/api/sync/push")
-def sync_push(transactions: List[schemas.TransactionCreate], db: Session = Depends(get_db)):
-    # Simple upsert based on provided IDs (if we had IDs in TransactionCreate)
-    # Actually, we should probably use a dedicated Sync schema that includes IDs
-    for tx_data in transactions:
-        # Check if already exists
-        existing = db.query(models.Transaction).filter(models.Transaction.id == tx_data.id).first()
-        if not existing:
-            # Create new
-            tx_id = tx_data.id or str(uuid.uuid4())
-            db_tx = models.Transaction(
-                id=tx_id,
-                type_flux="ENTREE" if tx_data.type == "credit" else "SORTIE",
-                montant=tx_data.amount,
-                devise=tx_data.currency,
-                montant_xaf=tx_data.amount,
-                categorie_id=tx_data.category_id,
-                compte_id=tx_data.account_id,
-                tiers_nom=tx_data.description,
-                reference_externe=tx_data.reference,
-                date_operation=tx_data.date,
-                date_saisie=datetime.now().isoformat(),
-                date_sync=datetime.now().isoformat(),
-                statut="CONFIRME",
-                hash=tx_data.hash or ""
-            )
-            db.add(db_tx)
-    db.commit()
-    return {"status": "ok"}
+def calculate_credit_score(db: Session, transactions: List[models.Transaction]):
+    if not transactions:
+        return {"overall": 0, "financial": 0, "reliability": 0, "factors": []}
+
+    total_count = len(transactions)
+    
+    # --- RELIABILITY SCORE (Max 50) ---
+    # 1. Justification (Attachments) - 20 pts
+    tx_ids = [t.id for t in transactions]
+    attachments_count = db.query(models.PieceJointe).filter(models.PieceJointe.transaction_id.in_(tx_ids)).count()
+    proof_rate = attachments_count / total_count if total_count > 0 else 0
+    score_proof = min(20, proof_rate * 40) # 50% proofs = 20 pts
+    
+    # 2. Automation (Source) - 15 pts
+    automated_count = sum(1 for t in transactions if t.source_saisie and t.source_saisie != "MANUEL")
+    auto_rate = automated_count / total_count if total_count > 0 else 0
+    score_auto = auto_rate * 15
+    
+    # 3. Reconciliation - 15 pts
+    reconciled_count = db.query(models.Rapprochement).filter(models.Rapprochement.transaction_id.in_(tx_ids)).count()
+    reconcile_rate = reconciled_count / total_count if total_count > 0 else 0
+    score_reconcile = reconcile_rate * 15
+    
+    # 4. Penalty: Backdating
+    backdated_count = 0
+    for tx in transactions:
+        try:
+            # We consider anything backdated more than 3 days as suspicious for credit
+            op_date = datetime.fromisoformat(tx.date_operation.split('T')[0])
+            saisie_date = datetime.fromisoformat(tx.date_saisie.split('T')[0])
+            if (saisie_date - op_date).days > 3:
+                backdated_count += 1
+        except:
+            pass
+    
+    penalty_backdating = min(40, (backdated_count / total_count) * 200) if total_count > 0 else 0
+    
+    reliability_score = max(0, score_proof + score_auto + score_reconcile - penalty_backdating)
+    
+    # --- FINANCIAL SCORE (Max 50) ---
+    # Simple metrics for now
+    total_in = sum(t.montant for t in transactions if t.type_flux == "ENTREE")
+    total_out = sum(t.montant for t in transactions if t.type_flux == "SORTIE")
+    net_margin = (total_in - total_out) / total_in if total_in > 0 else 0
+    
+    score_margin = min(25, max(0, net_margin * 50)) # 50% margin = 25 pts
+    
+    # Activity regularity (tx count)
+    score_activity = min(25, (total_count / 30) * 25) # 30 tx/month avg = 25 pts
+    
+    financial_score = score_margin + score_activity
+    
+    overall = min(100, reliability_score + financial_score)
+    
+    return {
+        "overall": int(overall),
+        "reliability": int(reliability_score),
+        "financial": int(financial_score),
+        "factors": {
+            "proof_rate": round(proof_rate * 100, 1),
+            "auto_rate": round(auto_rate * 100, 1),
+            "reconcile_rate": round(reconcile_rate * 100, 1),
+            "backdated_count": backdated_count
+        },
+        "status": "EXCELLENT" if overall > 80 else "BON" if overall > 60 else "MOYEN" if overall > 40 else "FAIBLE"
+    }
 
 @app.get("/api/reports/cashflow")
 def get_cashflow_report(db: Session = Depends(get_db)):
     from datetime import date, timedelta
+    from collections import Counter
     today = date.today()
     months = []
     for i in range(5, -1, -1):
         d = (today.replace(day=1) - timedelta(days=i*28)).replace(day=1)
         months.append(d.strftime("%Y-%m"))
     
+    initial_total = sum(acc.solde_initial for acc in db.query(models.Account).all())
+    first_month = months[0]
+    older_txs = db.query(models.Transaction).filter(models.Transaction.date_operation < first_month, models.Transaction.statut == "CONFIRME").all()
+    cumulative_balance = initial_total + sum(abs(t.montant) if t.type_flux == "ENTREE" else -abs(t.montant) for t in older_txs)
+
     res = []
+    all_categories = {c.id: c.libelle_user for c in db.query(models.Category).all()}
+    
     for m in months:
         txs = db.query(models.Transaction).filter(models.Transaction.date_operation.like(f"{m}%"), models.Transaction.statut == "CONFIRME").all()
-        income = sum(t.montant for t in txs if t.type_flux == "ENTREE")
-        expense = sum(t.montant for t in txs if t.type_flux == "SORTIE")
-        res.append({"month": m, "income": income, "expense": expense, "balance": income - expense})
-    return res
+        income = sum(abs(t.montant) for t in txs if t.type_flux == "ENTREE")
+        expense = sum(abs(t.montant) for t in txs if t.type_flux == "SORTIE")
+        cumulative_balance += (income - expense)
+        
+        cat_stats = Counter()
+        tx_details = []
+        for t in txs:
+            cat_stats[all_categories.get(t.categorie_id, "Autre")] += abs(t.montant)
+            # Fetch attachments for this transaction
+            attachments = db.query(models.PieceJointe).filter(models.PieceJointe.transaction_id == t.id).all()
+            tx_details.append({
+                "id": t.id,
+                "date": t.date_operation,
+                "description": t.tiers_nom or t.note,
+                "amount": abs(t.montant),
+                "type": "credit" if t.type_flux == "ENTREE" else "debit",
+                "reference": t.reference_externe,
+                "has_proof": len(attachments) > 0,
+                "proofs": [{"id": p.id, "type": p.type_fichier} for p in attachments]
+            })
+        
+        res.append({
+            "month": m, 
+            "income": income, 
+            "expense": expense, 
+            "balance": max(0, income - expense),
+            "cumulative": max(0, cumulative_balance),
+            "tx_count": len(txs),
+            "top_categories": [{"name": k, "value": v} for k, v in cat_stats.most_common(3)],
+            "transactions": tx_details # Added for proof verification
+        })
+    # Calculate Global Credit Score
+    all_txs_full = db.query(models.Transaction).filter(models.Transaction.statut == "CONFIRME").all()
+    credit_score = calculate_credit_score(db, all_txs_full)
+
+    return {
+        "monthly_data": res,
+        "credit_score": credit_score
+    }
+
+
 
 @app.post("/api/sync/push")
 def sync_push(transactions: List[schemas.TransactionCreate], db: Session = Depends(get_db)):
@@ -480,6 +553,7 @@ def get_public_report(token: str, db: Session = Depends(get_db)):
     raise HTTPException(status_code=400, detail="Type de rapport non supporté")
 
 @app.get("/api/reports/dashboard")
+
 def get_dashboard_summary(db: Session = Depends(get_db)):
     from datetime import date
     accounts = db.query(models.Account).all()
@@ -487,23 +561,31 @@ def get_dashboard_summary(db: Session = Depends(get_db)):
     recent = db.query(models.Transaction).order_by(models.Transaction.date_operation.desc()).limit(20).all()
     current_month = date.today().strftime("%Y-%m")
     month_txs = db.query(models.Transaction).filter(models.Transaction.date_operation.like(f"{current_month}%"), models.Transaction.statut == "CONFIRME").all()
-    m_in = sum(t.montant for t in month_txs if t.type_flux == "ENTREE")
-    m_out = sum(t.montant for t in month_txs if t.type_flux == "SORTIE")
+    m_in = sum(abs(t.montant) for t in month_txs if t.type_flux == "ENTREE")
+    m_out = sum(abs(t.montant) for t in month_txs if t.type_flux == "SORTIE")
+    
     balances = {}
     for acc in accounts:
         txs = db.query(models.Transaction).filter(models.Transaction.compte_id == acc.id, models.Transaction.statut == "CONFIRME").all()
-        balances[acc.id] = acc.solde_initial + sum(t.montant if t.type_flux == "ENTREE" else -t.montant for t in txs)
+        # Enforce floor at 0 for every account
+        bal = acc.solde_initial + sum(abs(t.montant) if t.type_flux == "ENTREE" else -abs(t.montant) for t in txs)
+        balances[acc.id] = max(0, bal)
+        
     return {
         "accounts": [{"id": a.id, "name": a.nom, "type": a.type_compte.lower()} for a in accounts],
         "balances": balances,
         "categories": [{"id": c.id, "name": c.libelle_user} for c in categories],
         "recentTransactions": [{
-            "id": tx.id, "amount": tx.montant, "date": tx.date_operation,
+            "id": tx.id, "amount": abs(tx.montant), "date": tx.date_operation,
             "type": "credit" if tx.type_flux == "ENTREE" else "debit",
             "description": tx.tiers_nom or tx.note, "account_id": tx.compte_id,
             "category_id": tx.categorie_id, "synced": tx.date_sync is not None
         } for tx in recent],
-        "monthlyIn": m_in, "monthlyOut": m_out, "netBalance": m_in - m_out
+        "monthlyIn": m_in, 
+        "monthlyOut": m_out, 
+        "netBalance": max(0, m_in - m_out) # Enforce floor at 0
     }
+
+
 
 
