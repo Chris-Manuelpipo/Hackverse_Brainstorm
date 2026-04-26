@@ -9,10 +9,15 @@ import os
 from sqlalchemy.orm import Session
 from typing import List
 
-from database import engine, get_db
+from database import engine, get_db, Base
 import models, schemas
 
-# models.Base.metadata.create_all(bind=engine) # Handled by init_db.py
+# Create tables if they don't exist
+try:
+    Base.metadata.create_all(bind=engine)
+    print("Database tables created/verified successfully")
+except Exception as e:
+    print(f"Warning: Could not create tables: {e}")
 
 app = FastAPI(title="PMECompta API")
 
@@ -24,7 +29,9 @@ def get_allowed_origins():
     return [
         "https://hackverse-brainstorm.vercel.app",
         "http://localhost:5173",
+        "http://localhost:5174",
         "http://127.0.0.1:5173",
+        "http://127.0.0.1:5174",
         "http://localhost:3000",
     ]
 
