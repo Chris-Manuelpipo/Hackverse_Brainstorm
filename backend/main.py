@@ -166,6 +166,20 @@ def get_transactions(db: Session = Depends(get_db)):
 
 @app.post("/api/transactions", response_model=schemas.TransactionResponse)
 def create_transaction(tx: schemas.TransactionCreate, db: Session = Depends(get_db)):
+    # --- BALANCE VALIDATION ---
+    if tx.type == "debit":
+        acc = db.query(models.Account).filter(models.Account.id == tx.account_id).first()
+        if not acc:
+            raise HTTPException(status_code=404, detail="Compte introuvable")
+        
+        # Calculate current balance
+        txs = db.query(models.Transaction).filter(models.Transaction.compte_id == tx.account_id, models.Transaction.statut == "CONFIRME").all()
+        current_bal = acc.solde_initial + sum(t.montant if t.type_flux == "ENTREE" else -t.montant for t in txs)
+        
+        if tx.amount > current_bal:
+            raise HTTPException(status_code=400, detail=f"Solde insuffisant (Disponible: {current_bal} XAF)")
+    # --- END VALIDATION ---
+
     tx_id = str(uuid.uuid4())
     type_flux = "ENTREE" if tx.type == "credit" else "SORTIE"
     
@@ -346,24 +360,84 @@ def sync_push(transactions: List[schemas.TransactionCreate], db: Session = Depen
     db.commit()
     return {"status": "ok"}
 
+@app.get("/api/reports/cashflow")
+def get_cashflow_report(db: Session = Depends(get_db)):
+    from datetime import date, timedelta
+    today = date.today()
+    months = []
+    for i in range(5, -1, -1):
+        d = (today.replace(day=1) - timedelta(days=i*28)).replace(day=1)
+        months.append(d.strftime("%Y-%m"))
+    
+    res = []
+    for m in months:
+        txs = db.query(models.Transaction).filter(models.Transaction.date_operation.like(f"{m}%"), models.Transaction.statut == "CONFIRME").all()
+        income = sum(t.montant for t in txs if t.type_flux == "ENTREE")
+        expense = sum(t.montant for t in txs if t.type_flux == "SORTIE")
+        res.append({"month": m, "income": income, "expense": expense, "balance": income - expense})
+    return res
+
+@app.post("/api/sync/push")
+def sync_push(transactions: List[schemas.TransactionCreate], db: Session = Depends(get_db)):
+    for tx_data in transactions:
+        if not db.query(models.Transaction).filter(models.Transaction.id == tx_data.id).first():
+            db_tx = models.Transaction(
+                id=tx_data.id or str(uuid.uuid4()),
+                type_flux="ENTREE" if tx_data.type == "credit" else "SORTIE",
+                montant=tx_data.amount,
+                devise=tx_data.currency,
+                montant_xaf=tx_data.amount,
+                categorie_id=tx_data.category_id,
+                compte_id=tx_data.account_id,
+                tiers_nom=tx_data.description,
+                reference_externe=tx_data.reference,
+                date_operation=tx_data.date,
+                date_saisie=datetime.now().isoformat(),
+                date_sync=datetime.now().isoformat(),
+                statut="CONFIRME",
+                hash=tx_data.hash or ""
+            )
+            db.add(db_tx)
+    db.commit()
+    return {"status": "ok"}
+
 @app.get("/api/sync/pull")
 def sync_pull(last_sync: str = None, db: Session = Depends(get_db)):
     query = db.query(models.Transaction)
-    if last_sync:
-        query = query.filter(models.Transaction.date_saisie > last_sync)
-    
+    if last_sync: query = query.filter(models.Transaction.date_saisie > last_sync)
     txs = query.all()
-    res = []
-    for tx in txs:
-        res.append({
-            "id": tx.id,
-            "account_id": tx.compte_id,
-            "category_id": tx.categorie_id,
+    return [{
+        "id": tx.id, "account_id": tx.compte_id, "category_id": tx.categorie_id,
+        "type": "credit" if tx.type_flux == "ENTREE" else "debit", "amount": tx.montant,
+        "date": tx.date_operation, "description": tx.tiers_nom or tx.note,
+        "reference": tx.reference_externe, "hash": tx.hash
+    } for tx in txs]
+
+@app.get("/api/reports/dashboard")
+def get_dashboard_summary(db: Session = Depends(get_db)):
+    from datetime import date
+    accounts = db.query(models.Account).all()
+    categories = db.query(models.Category).all()
+    recent = db.query(models.Transaction).order_by(models.Transaction.date_operation.desc()).limit(20).all()
+    current_month = date.today().strftime("%Y-%m")
+    month_txs = db.query(models.Transaction).filter(models.Transaction.date_operation.like(f"{current_month}%"), models.Transaction.statut == "CONFIRME").all()
+    m_in = sum(t.montant for t in month_txs if t.type_flux == "ENTREE")
+    m_out = sum(t.montant for t in month_txs if t.type_flux == "SORTIE")
+    balances = {}
+    for acc in accounts:
+        txs = db.query(models.Transaction).filter(models.Transaction.compte_id == acc.id, models.Transaction.statut == "CONFIRME").all()
+        balances[acc.id] = acc.solde_initial + sum(t.montant if t.type_flux == "ENTREE" else -t.montant for t in txs)
+    return {
+        "accounts": [{"id": a.id, "name": a.nom, "type": a.type_compte.lower()} for a in accounts],
+        "balances": balances,
+        "categories": [{"id": c.id, "name": c.libelle_user} for c in categories],
+        "recentTransactions": [{
+            "id": tx.id, "amount": tx.montant, "date": tx.date_operation,
             "type": "credit" if tx.type_flux == "ENTREE" else "debit",
-            "amount": tx.montant,
-            "date": tx.date_operation,
-            "description": tx.tiers_nom or tx.note,
-            "reference": tx.reference_externe,
-            "hash": tx.hash
-        })
-    return res
+            "description": tx.tiers_nom or tx.note, "account_id": tx.compte_id,
+            "category_id": tx.categorie_id, "synced": tx.date_sync is not None
+        } for tx in recent],
+        "monthlyIn": m_in, "monthlyOut": m_out, "netBalance": m_in - m_out
+    }
+
+
