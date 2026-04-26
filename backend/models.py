@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Float, ForeignKey
+from sqlalchemy import Column, Integer, String, Float, ForeignKey, Boolean
 from sqlalchemy.orm import relationship
 from database import Base
 
@@ -7,7 +7,7 @@ class Devise(Base):
     code = Column(String, primary_key=True, index=True)
     nom = Column(String, nullable=False)
     symbole = Column(String, nullable=False)
-    actif = Column(Integer, default=1, nullable=False)
+    actif = Column(Boolean, default=True, nullable=False)
 
 class Category(Base):
     __tablename__ = "categories"
@@ -18,7 +18,7 @@ class Category(Base):
     type_flux = Column(String, nullable=False)
     groupe_bilan = Column(String, nullable=False)
     icone = Column(String)
-    actif = Column(Integer, default=1, nullable=False)
+    actif = Column(Boolean, default=True, nullable=False)
 
 class Account(Base):
     __tablename__ = "comptes"
@@ -29,7 +29,7 @@ class Account(Base):
     devise = Column(String, ForeignKey("devises.code"), default="XAF", nullable=False)
     solde_initial = Column(Float, default=0.0, nullable=False)
     date_ouverture = Column(String, nullable=False)
-    actif = Column(Integer, default=1, nullable=False)
+    actif = Column(Boolean, default=True, nullable=False)
     note = Column(String)
 
 class PieceJointe(Base):
@@ -79,4 +79,4 @@ class SharedReport(Base):
     report_type = Column(String, nullable=False) # e.g., 'cashflow'
     created_at = Column(String, nullable=False)
     expires_at = Column(String)
-    is_active = Column(Integer, default=1)
+    is_active = Column(Boolean, default=True)

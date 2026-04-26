@@ -60,7 +60,7 @@ def health():
 
 @app.get("/api/accounts", response_model=List[schemas.AccountResponse])
 def get_accounts(db: Session = Depends(get_db)):
-    accounts = db.query(models.Account).filter(models.Account.actif == 1).all()
+    accounts = db.query(models.Account).filter(models.Account.actif == True).all()
     # Map to schema
     res = []
     for a in accounts:
@@ -112,7 +112,7 @@ def delete_account(account_id: str, db: Session = Depends(get_db)):
     acc = db.query(models.Account).filter(models.Account.id == account_id).first()
     if not acc:
         raise HTTPException(status_code=404)
-    acc.actif = 0
+    acc.actif = False
     db.commit()
     return {"status": "ok"}
 
@@ -120,7 +120,7 @@ def delete_account(account_id: str, db: Session = Depends(get_db)):
 
 @app.get("/api/categories", response_model=List[schemas.CategoryResponse])
 def get_categories(db: Session = Depends(get_db)):
-    cats = db.query(models.Category).filter(models.Category.actif == 1).all()
+    cats = db.query(models.Category).filter(models.Category.actif == True).all()
     res = []
     for c in cats:
         res.append({
