@@ -165,21 +165,22 @@ def get_transactions(db: Session = Depends(get_db)):
     txs = db.query(models.Transaction).order_by(models.Transaction.date_operation.desc()).all()
     res = []
     for tx in txs:
-        # Fraud detection: date_operation vs date_saisie
         try:
-            op_date = datetime.fromisoformat(tx.date_operation.split('T')[0])
-            saisie_date = datetime.fromisoformat(tx.date_saisie.split('T')[0])
+            op_date_str = str(tx.date_operation)
+            saisie_str = str(tx.date_saisie) if tx.date_saisie else op_date_str
+            op_date = datetime.fromisoformat(op_date_str.split('T')[0])
+            saisie_date = datetime.fromisoformat(saisie_str.split('T')[0])
             is_backdated = (saisie_date - op_date).days > 3
         except:
             is_backdated = False
 
         res.append({
-            "id": tx.id,
-            "account_id": tx.compte_id,
+            "id": str(tx.id),
+            "account_id": str(tx.compte_id),
             "category_id": tx.categorie_id,
             "type": "credit" if tx.type_flux == "ENTREE" else "debit",
-            "amount": abs(tx.montant),
-            "date": tx.date_operation,
+            "amount": float(abs(tx.montant)),
+            "date": str(tx.date_operation),
             "description": tx.tiers_nom or tx.note,
             "reference": tx.reference_externe,
             "hash": tx.hash,
