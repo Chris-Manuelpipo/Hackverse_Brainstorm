@@ -1,6 +1,6 @@
 from sqlalchemy import Column, Integer, String, Float, ForeignKey
 from sqlalchemy.orm import relationship
-from database import Base 
+from database import Base
 
 class Devise(Base):
     __tablename__ = "devises"
@@ -73,3 +73,10 @@ class Rapprochement(Base):
     reference_interne = Column(String, nullable=False)
     montant = Column(Float, nullable=False)
     date_creation = Column(String, nullable=False)
+class SharedReport(Base):
+    __tablename__ = "shared_reports"
+    token = Column(String, primary_key=True, index=True)
+    report_type = Column(String, nullable=False) # e.g., 'cashflow'
+    created_at = Column(String, nullable=False)
+    expires_at = Column(String)
+    is_active = Column(Integer, default=1)

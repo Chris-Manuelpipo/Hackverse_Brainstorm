@@ -16,23 +16,39 @@ import models, schemas
 
 app = FastAPI(title="PMECompta API")
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
+
+def get_allowed_origins():
+    env_origins = os.getenv("FRONTEND_URL") or os.getenv("FRONTEND_ORIGINS")
+    if env_origins:
+        return [origin.strip() for origin in env_origins.split(",") if origin.strip()]
+    return [
         "http://localhost:5173",
         "http://127.0.0.1:5173",
         "http://localhost:3000",
-        "*"
-    ],
+    ]
+
+
+ALLOWED_ORIGINS = get_allowed_origins()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=ALLOWED_ORIGINS,
+    allow_origin_regex=os.getenv("CORS_ALLOW_ORIGIN_REGEX", r"https://.*\.vercel\.app"),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
     expose_headers=["*"]
 )
 
+os.makedirs("uploads", exist_ok=True)
 app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
 
-# --- COMPTES ----
+
+@app.get("/health")
+def health():
+    return {"status": "ok", "timestamp": datetime.now().isoformat()}
+
+# --- COMPTES ---
 
 @app.get("/api/accounts", response_model=List[schemas.AccountResponse])
 def get_accounts(db: Session = Depends(get_db)):
@@ -421,6 +437,47 @@ def sync_pull(last_sync: str = None, db: Session = Depends(get_db)):
         "date": tx.date_operation, "description": tx.tiers_nom or tx.note,
         "reference": tx.reference_externe, "hash": tx.hash
     } for tx in txs]
+
+@app.post("/api/reports/share", response_model=schemas.SharedReportResponse)
+def share_report(req: schemas.SharedReportCreate, db: Session = Depends(get_db)):
+    from datetime import timedelta
+    token = str(uuid.uuid4())
+    expires_at = (datetime.now() + timedelta(days=req.expires_in_days)).isoformat() if req.expires_in_days else None
+    
+    db_shared = models.SharedReport(
+        token=token,
+        report_type=req.report_type,
+        created_at=datetime.now().isoformat(),
+        expires_at=expires_at
+    )
+    db.add(db_shared)
+    db.commit()
+    
+    # In a real app, this would be the actual domain
+    share_url = f"/shared-report/{token}"
+    
+    return {
+        "token": token,
+        "report_type": db_shared.report_type,
+        "expires_at": db_shared.expires_at,
+        "share_url": share_url
+    }
+
+@app.get("/api/public/reports/{token}")
+def get_public_report(token: str, db: Session = Depends(get_db)):
+    shared = db.query(models.SharedReport).filter(models.SharedReport.token == token, models.SharedReport.is_active == 1).first()
+    if not shared:
+        raise HTTPException(status_code=404, detail="Rapport introuvable ou lien expiré")
+    
+    if shared.expires_at and datetime.fromisoformat(shared.expires_at) < datetime.now():
+        shared.is_active = 0
+        db.commit()
+        raise HTTPException(status_code=404, detail="Lien expiré")
+    
+    if shared.report_type == "cashflow":
+        return get_cashflow_report(db)
+    
+    raise HTTPException(status_code=400, detail="Type de rapport non supporté")
 
 @app.get("/api/reports/dashboard")
 def get_dashboard_summary(db: Session = Depends(get_db)):
