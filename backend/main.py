@@ -18,10 +18,16 @@ app = FastAPI(title="PMECompta API")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://localhost:3000",
+        "*"
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"]
 )
 
 app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
@@ -307,3 +313,57 @@ def get_setting(key: str):
 def set_setting(key: str, payload: dict):
     settings_db[key] = payload.get("value")
     return {"status": "ok"}
+
+# --- SYNC ---
+
+@app.post("/api/sync/push")
+def sync_push(transactions: List[schemas.TransactionCreate], db: Session = Depends(get_db)):
+    # Simple upsert based on provided IDs (if we had IDs in TransactionCreate)
+    # Actually, we should probably use a dedicated Sync schema that includes IDs
+    for tx_data in transactions:
+        # Check if already exists
+        existing = db.query(models.Transaction).filter(models.Transaction.id == tx_data.id).first()
+        if not existing:
+            # Create new
+            tx_id = tx_data.id or str(uuid.uuid4())
+            db_tx = models.Transaction(
+                id=tx_id,
+                type_flux="ENTREE" if tx_data.type == "credit" else "SORTIE",
+                montant=tx_data.amount,
+                devise=tx_data.currency,
+                montant_xaf=tx_data.amount,
+                categorie_id=tx_data.category_id,
+                compte_id=tx_data.account_id,
+                tiers_nom=tx_data.description,
+                reference_externe=tx_data.reference,
+                date_operation=tx_data.date,
+                date_saisie=datetime.now().isoformat(),
+                date_sync=datetime.now().isoformat(),
+                statut="CONFIRME",
+                hash=tx_data.hash or ""
+            )
+            db.add(db_tx)
+    db.commit()
+    return {"status": "ok"}
+
+@app.get("/api/sync/pull")
+def sync_pull(last_sync: str = None, db: Session = Depends(get_db)):
+    query = db.query(models.Transaction)
+    if last_sync:
+        query = query.filter(models.Transaction.date_saisie > last_sync)
+    
+    txs = query.all()
+    res = []
+    for tx in txs:
+        res.append({
+            "id": tx.id,
+            "account_id": tx.compte_id,
+            "category_id": tx.categorie_id,
+            "type": "credit" if tx.type_flux == "ENTREE" else "debit",
+            "amount": tx.montant,
+            "date": tx.date_operation,
+            "description": tx.tiers_nom or tx.note,
+            "reference": tx.reference_externe,
+            "hash": tx.hash
+        })
+    return res
