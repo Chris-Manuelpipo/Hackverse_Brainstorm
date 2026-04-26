@@ -431,35 +431,45 @@ def get_cashflow_report(db: Session = Depends(get_db)):
         d = (today.replace(day=1) - timedelta(days=i*28)).replace(day=1)
         months.append(d.strftime("%Y-%m"))
     
-    initial_total = sum(acc.solde_initial for acc in db.query(models.Account).all())
+    initial_total = sum(float(acc.solde_initial or 0) for acc in db.query(models.Account).all())
     first_month = months[0]
-    older_txs = db.query(models.Transaction).filter(models.Transaction.date_operation < first_month, models.Transaction.statut == "CONFIRME").all()
-    cumulative_balance = initial_total + sum(abs(t.montant) if t.type_flux == "ENTREE" else -abs(t.montant) for t in older_txs)
+    # Use proper date comparison for PostgreSQL
+    first_month_date = f"{first_month}-01"
+    older_txs = db.query(models.Transaction).filter(
+        models.Transaction.date_operation < first_month_date,
+        models.Transaction.statut == "CONFIRME"
+    ).all()
+    cumulative_balance = initial_total + sum(float(abs(t.montant)) if t.type_flux == "ENTREE" else -float(abs(t.montant)) for t in older_txs)
 
     res = []
     all_categories = {c.id: c.libelle_user for c in db.query(models.Category).all()}
     
     for m in months:
-        txs = db.query(models.Transaction).filter(models.Transaction.date_operation.like(f"{m}%"), models.Transaction.statut == "CONFIRME").all()
-        income = sum(abs(t.montant) for t in txs if t.type_flux == "ENTREE")
-        expense = sum(abs(t.montant) for t in txs if t.type_flux == "SORTIE")
+        # Use extract for month comparison in PostgreSQL
+        from sqlalchemy import extract
+        txs = db.query(models.Transaction).filter(
+            extract('year', models.Transaction.date_operation) == int(m.split('-')[0]),
+            extract('month', models.Transaction.date_operation) == int(m.split('-')[1]),
+            models.Transaction.statut == "CONFIRME"
+        ).all()
+        income = sum(float(abs(t.montant)) for t in txs if t.type_flux == "ENTREE")
+        expense = sum(float(abs(t.montant)) for t in txs if t.type_flux == "SORTIE")
         cumulative_balance += (income - expense)
         
         cat_stats = Counter()
         tx_details = []
         for t in txs:
-            cat_stats[all_categories.get(t.categorie_id, "Autre")] += abs(t.montant)
-            # Fetch attachments for this transaction
+            cat_stats[all_categories.get(t.categorie_id, "Autre")] += float(abs(t.montant))
             attachments = db.query(models.PieceJointe).filter(models.PieceJointe.transaction_id == t.id).all()
             tx_details.append({
-                "id": t.id,
-                "date": t.date_operation,
+                "id": str(t.id),
+                "date": str(t.date_operation),
                 "description": t.tiers_nom or t.note,
-                "amount": abs(t.montant),
+                "amount": float(abs(t.montant)),
                 "type": "credit" if t.type_flux == "ENTREE" else "debit",
                 "reference": t.reference_externe,
                 "has_proof": len(attachments) > 0,
-                "proofs": [{"id": p.id, "type": p.type_fichier} for p in attachments]
+                "proofs": [{"id": str(p.id), "type": p.type_fichier} for p in attachments]
             })
         
         res.append({
@@ -470,7 +480,7 @@ def get_cashflow_report(db: Session = Depends(get_db)):
             "cumulative": max(0, cumulative_balance),
             "tx_count": len(txs),
             "top_categories": [{"name": k, "value": v} for k, v in cat_stats.most_common(3)],
-            "transactions": tx_details # Added for proof verification
+            "transactions": tx_details
         })
     # Calculate Global Credit Score
     all_txs_full = db.query(models.Transaction).filter(models.Transaction.statut == "CONFIRME").all()
