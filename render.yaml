@@ -11,8 +11,8 @@ services:
       - key: PYTHON_VERSION
         value: 3.11.0
       - key: FRONTEND_URL
-        sync: false
+        value: https://hackverse-brainstorm.vercel.app
       - key: DATABASE_URL
-        sync: false
+        value: postgresql://pme_user:6rp9nib6evfMfeowoJEYbX1wxmH3zEU5@dpg-d7mh81a8qa3s739nkfjg-a.ohio-postgres.render.com/pme_compta
       - key: CORS_ALLOW_ORIGIN_REGEX
-        value: https://.*\\.vercel\\.app
+        value: https://.*\.vercel\.app
