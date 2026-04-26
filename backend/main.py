@@ -61,15 +61,14 @@ def health():
 @app.get("/api/accounts", response_model=List[schemas.AccountResponse])
 def get_accounts(db: Session = Depends(get_db)):
     accounts = db.query(models.Account).filter(models.Account.actif == True).all()
-    # Map to schema
     res = []
     for a in accounts:
         res.append({
-            "id": a.id,
+            "id": str(a.id),  # Convert UUID to string
             "name": a.nom,
             "type": a.type_compte.lower(),
-            "initial_balance": max(0, a.solde_initial),
-            "currency": a.devise
+            "initial_balance": max(0, float(a.solde_initial)),
+            "currency": a.devise or "XAF"
         })
     return res
 
