@@ -1,0 +1,11 @@
+# Pour le frontend web, les dépendances sont gérées via package.json
+# Vous pouvez les installer avec : npm install
+
+react
+react-dom
+react-router-dom
+lucide-react
+recharts
+dexie
+vite (dev)
+@vitejs/plugin-react (dev)
